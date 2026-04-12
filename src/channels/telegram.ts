@@ -23,9 +23,24 @@ export interface TelegramChannelOpts {
 }
 
 /**
- * Send a message with Telegram Markdown parse mode, falling back to plain text.
- * Claude's output naturally matches Telegram's Markdown v1 format:
- *   *bold*, _italic_, `code`, ```code blocks```, [links](url)
+ * Convert Claude's Markdown output to Telegram-safe HTML.
+ * Handles: code blocks, inline code, bold, italic, and HTML-escaping.
+ */
+function markdownToHtml(text: string): string {
+  let out = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  out = out.replace(/```\w*\n?([\s\S]*?)```/g, (_m, c) => `<pre>${c.trimEnd()}</pre>`);
+  out = out.replace(/`([^`\n]+)`/g, (_m, c) => `<code>${c}</code>`);
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, (_m, i) => `<b>${i}</b>`);
+  out = out.replace(/\*([^*\n]+)\*/g, (_m, i) => `<b>${i}</b>`);
+  out = out.replace(/_([^_\n]+)_/g, (_m, i) => `<i>${i}</i>`);
+  return out;
+}
+
+/**
+ * Send a message as HTML, falling back to plain text if parsing fails.
  */
 async function sendTelegramMessage(
   api: { sendMessage: Api['sendMessage'] },
@@ -33,14 +48,14 @@ async function sendTelegramMessage(
   text: string,
   options: { message_thread_id?: number } = {},
 ): Promise<void> {
+  const html = markdownToHtml(text);
   try {
-    await api.sendMessage(chatId, text, {
+    await api.sendMessage(chatId, html, {
       ...options,
-      parse_mode: 'Markdown',
+      parse_mode: 'HTML',
     });
   } catch (err) {
-    // Fallback: send as plain text if Markdown parsing fails
-    logger.debug({ err }, 'Markdown send failed, falling back to plain text');
+    logger.debug({ err }, 'HTML send failed, falling back to plain text');
     await api.sendMessage(chatId, text, options);
   }
 }
@@ -122,8 +137,8 @@ export class TelegramChannel implements Channel {
           : (ctx.chat as any).title || 'Unknown';
 
       ctx.reply(
-        `Chat ID: \`tg:${chatId}\`\nName: ${chatName}\nType: ${chatType}`,
-        { parse_mode: 'Markdown' },
+        `Chat ID: <code>tg:${chatId}</code>\nName: ${chatName}\nType: ${chatType}`,
+        { parse_mode: 'HTML' },
       );
     });
 

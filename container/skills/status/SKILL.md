@@ -1,11 +1,11 @@
 ---
 name: status
-description: Quick read-only health check — session context, workspace mounts, tool availability, and task snapshot. Use when the user asks for system status or runs /status.
+description: OpenClaw-style status dashboard — version, model, session, context, tools, and tasks. Use when the user runs /status.
 ---
 
-# /status — System Status Check
+# /status — System Status Dashboard
 
-Generate a quick read-only status report of the current agent environment.
+Generate a compact OpenClaw-style status report.
 
 **Main-channel check:** Only the main channel has `/workspace/project` mounted. Run:
 
@@ -14,91 +14,65 @@ test -d /workspace/project && echo "MAIN" || echo "NOT_MAIN"
 ```
 
 If `NOT_MAIN`, respond with:
-> This command is available in your main chat only. Send `/status` there to check system status.
+> This command is available in your main chat only. Send `/status` there.
 
-Then stop — do not generate the report.
+Then stop.
 
 ## How to gather the information
 
-Run the checks below and compile results into the report format.
-
-### 1. Session context
+Run ALL commands in a single Bash call to minimize overhead:
 
 ```bash
-echo "Timestamp: $(date)"
-echo "Working dir: $(pwd)"
-echo "Channel: main"
-```
+echo "=== VERSION ==="
+cat /workspace/project/package.json 2>/dev/null | grep '"version"' | head -1
+git -C /workspace/project rev-parse --short HEAD 2>/dev/null || echo "no-git"
 
-### 2. Workspace and mount visibility
+echo "=== MODEL ==="
+claude --version 2>/dev/null || echo "unknown"
 
-```bash
-echo "=== Workspace ==="
-ls /workspace/ 2>/dev/null
-echo "=== Group folder ==="
-ls /workspace/group/ 2>/dev/null | head -20
-echo "=== Extra mounts ==="
-ls /workspace/extra/ 2>/dev/null || echo "none"
-echo "=== IPC ==="
-ls /workspace/ipc/ 2>/dev/null
-```
+echo "=== SESSION ==="
+echo "Timestamp: $(TZ=${TZ:-UTC} date '+%Y-%m-%d %H:%M %Z')"
+echo "Session ID: ${SESSION_ID:-unknown}"
+echo "Group: $(basename /workspace/group 2>/dev/null)"
 
-### 3. Tool availability
+echo "=== WORKSPACE ==="
+test -d /workspace/project && echo "project: rw" || echo "project: none"
+ls /workspace/group/ 2>/dev/null | wc -l | xargs -I{} echo "group files: {}"
+ls /workspace/ipc/ 2>/dev/null | tr '\n' ', '
 
-Confirm which tool families are available to you:
-
-- **Core:** Bash, Read, Write, Edit, Glob, Grep
-- **Web:** WebSearch, WebFetch
-- **Orchestration:** Task, TaskOutput, TaskStop, TeamCreate, TeamDelete, SendMessage
-- **MCP:** mcp__nanoclaw__* (send_message, schedule_task, list_tasks, pause_task, resume_task, cancel_task, update_task, register_group)
-
-### 4. Container utilities
-
-```bash
-which agent-browser 2>/dev/null && echo "agent-browser: available" || echo "agent-browser: not installed"
+echo "=== TOOLS ==="
+which agent-browser 2>/dev/null && echo "browser: yes" || echo "browser: no"
 node --version 2>/dev/null
-claude --version 2>/dev/null
+
+echo "=== TASKS ==="
+cat /workspace/ipc/current_tasks.json 2>/dev/null || echo "[]"
 ```
 
-### 5. Task snapshot
-
-Use the MCP tool to list tasks:
-
-```
-Call mcp__nanoclaw__list_tasks to get scheduled tasks.
-```
-
-If no tasks exist, report "No scheduled tasks."
+Then also call `mcp__nanoclaw__list_tasks` to get the freshest task data.
 
 ## Report format
 
-Present as a clean, readable message:
+Present as a single compact message. Use this exact format, adapting values:
 
 ```
-🔍 *NanoClaw Status*
+🦞 NanoClaw {version} ({git-short-hash})
+🧠 Model: {claude-version}
+🕐 {timestamp}
+📂 Session: {group-name} · {session-id-short}
 
-*Session:*
-• Channel: main
-• Time: 2026-03-14 09:30 UTC
-• Working dir: /workspace/group
+📦 Workspace:
+• Project: ✓ rw | Group: {N} files | IPC: ✓
 
-*Workspace:*
-• Group folder: ✓ (N files)
-• Extra mounts: none / N directories
-• IPC: ✓ (messages, tasks, input)
+🔧 Tools:
+• Core: ✓  Web: ✓  MCP: ✓  Browser: ✓/✗
 
-*Tools:*
-• Core: ✓  Web: ✓  Orchestration: ✓  MCP: ✓
-
-*Container:*
-• agent-browser: ✓ / not installed
-• Node: vXX.X.X
-• Claude Code: vX.X.X
-
-*Scheduled Tasks:*
-• N active tasks / No scheduled tasks
+📋 Tasks: {N} active / {N} paused / {N} total
+{if tasks exist, list each on one line: • task-name — schedule — status}
 ```
 
-Adapt based on what you actually find. Keep it concise — this is a quick health check, not a deep diagnostic.
-
-**See also:** `/capabilities` for a full list of installed skills and tools.
+Rules:
+- Keep it tight — no extra blank lines or explanations
+- Use ✓/✗ for boolean states
+- Shorten session IDs to first 8 chars
+- If no tasks, show "📋 Tasks: none"
+- Show project mount as "rw" or "ro" based on whether you can write to `/workspace/project`

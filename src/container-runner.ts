@@ -2,7 +2,7 @@
  * Container Runner for NanoClaw
  * Spawns agent execution in containers and handles IPC
  */
-import { ChildProcess, spawn } from 'child_process';
+import { ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -67,15 +67,12 @@ function buildVolumeMounts(
   const groupDir = resolveGroupFolderPath(group.folder);
 
   if (isMain) {
-    // Main gets the project root read-only. Writable paths the agent needs
-    // (store, group folder, IPC, .claude/) are mounted separately below.
-    // Read-only prevents the agent from modifying host application code
-    // (src/, dist/, package.json, etc.) which would bypass the sandbox
-    // entirely on next restart.
+    // Main gets the project root read-write so the agent can edit host
+    // code directly. The outer LXD container provides the isolation boundary.
     mounts.push({
       hostPath: projectRoot,
       containerPath: '/workspace/project',
-      readonly: true,
+      readonly: false,
     });
 
     // Shadow .env so the agent cannot read secrets from the mounted project root.
@@ -237,6 +234,23 @@ function buildVolumeMounts(
       isMain,
     );
     mounts.push(...validatedMounts);
+  }
+
+  // Fix ownership on writable mounts so the container's node user (uid 1000)
+  // can write to directories created by the root host process.
+  const hostUid = process.getuid?.();
+  if (hostUid === 0) {
+    for (const mount of mounts) {
+      if (!mount.readonly && fs.existsSync(mount.hostPath)) {
+        try {
+          execSync(`chown -R 1000:1000 ${JSON.stringify(mount.hostPath)}`, {
+            stdio: 'ignore',
+          });
+        } catch {
+          // Best-effort — some paths (like /dev/null) can't be chowned
+        }
+      }
+    }
   }
 
   return mounts;

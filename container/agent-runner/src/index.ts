@@ -21,6 +21,8 @@ import {
   query,
   HookCallback,
   PreCompactHookInput,
+  PreToolUseHookInput,
+  PostToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
@@ -203,6 +205,162 @@ function createPreCompactHook(assistantName?: string): HookCallback {
       );
     }
 
+    return {};
+  };
+}
+
+const IPC_MESSAGES_DIR = '/workspace/ipc/messages';
+
+// Tools that are too spammy or noisy to report in chat
+const SKIP_TOOLS = new Set([
+  'WebSearch',  // often called in rapid sequence
+]);
+
+// Max length for inline input descriptions
+const MAX_INPUT_PREVIEW = 80;
+
+/**
+ * Write a message IPC file so the host delivers it to the Telegram chat.
+ * Non-blocking: errors are swallowed so a broken hook never kills the agent.
+ */
+function sendIpcMessage(
+  chatJid: string,
+  groupFolder: string,
+  text: string,
+): void {
+  try {
+    fs.mkdirSync(IPC_MESSAGES_DIR, { recursive: true });
+    const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+    const filepath = path.join(IPC_MESSAGES_DIR, filename);
+    const tempPath = `${filepath}.tmp`;
+    const data = {
+      type: 'message',
+      chatJid,
+      text,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    };
+    fs.writeFileSync(tempPath, JSON.stringify(data));
+    fs.renameSync(tempPath, filepath);
+  } catch {
+    // Never throw from a hook — just silently skip
+  }
+}
+
+/**
+ * Summarise tool input into a short human-readable string.
+ */
+function describeToolInput(toolName: string, toolInput: unknown): string {
+  if (!toolInput || typeof toolInput !== 'object') return '';
+
+  const input = toolInput as Record<string, unknown>;
+
+  // Tool-specific formatting
+  if (toolName === 'Bash' && typeof input.command === 'string') {
+    const cmd = input.command.replace(/\s+/g, ' ').trim();
+    return cmd.length > MAX_INPUT_PREVIEW
+      ? cmd.slice(0, MAX_INPUT_PREVIEW) + '…'
+      : cmd;
+  }
+  if ((toolName === 'Read' || toolName === 'Write' || toolName === 'Edit') && typeof input.file_path === 'string') {
+    return input.file_path;
+  }
+  if (toolName === 'Glob' && typeof input.pattern === 'string') {
+    return input.pattern;
+  }
+  if (toolName === 'Grep' && typeof input.pattern === 'string') {
+    return input.pattern;
+  }
+  if (toolName === 'WebFetch' && typeof input.url === 'string') {
+    return input.url.length > MAX_INPUT_PREVIEW
+      ? input.url.slice(0, MAX_INPUT_PREVIEW) + '…'
+      : input.url;
+  }
+  if (toolName === 'WebSearch' && typeof input.query === 'string') {
+    return input.query.length > MAX_INPUT_PREVIEW
+      ? input.query.slice(0, MAX_INPUT_PREVIEW) + '…'
+      : input.query;
+  }
+  if (toolName === 'Task' && typeof input.description === 'string') {
+    return input.description.length > MAX_INPUT_PREVIEW
+      ? input.description.slice(0, MAX_INPUT_PREVIEW) + '…'
+      : input.description;
+  }
+
+  // Generic fallback: first string value found
+  for (const val of Object.values(input)) {
+    if (typeof val === 'string' && val.length > 0) {
+      const cleaned = val.replace(/\s+/g, ' ').trim();
+      return cleaned.length > MAX_INPUT_PREVIEW
+        ? cleaned.slice(0, MAX_INPUT_PREVIEW) + '…'
+        : cleaned;
+    }
+  }
+  return '';
+}
+
+interface ToolCallTimer {
+  [toolUseId: string]: number;
+}
+
+// Shared start-time map used by both PreToolUse and PostToolUse hooks
+const toolStartTimes: ToolCallTimer = {};
+
+/**
+ * Create PreToolUse hook — fires before each tool call.
+ * Sends 🔧 toolname: description to the Telegram chat.
+ */
+function createPreToolUseHook(
+  chatJid: string,
+  groupFolder: string,
+): HookCallback {
+  return async (input, toolUseId, _context) => {
+    const hookInput = input as PreToolUseHookInput;
+    const { tool_name, tool_input, tool_use_id } = hookInput;
+
+    if (SKIP_TOOLS.has(tool_name)) return {};
+
+    // Record start time for PostToolUse duration calculation
+    const id = toolUseId || tool_use_id;
+    if (id) toolStartTimes[id] = Date.now();
+
+    const desc = describeToolInput(tool_name, tool_input);
+    const text = desc
+      ? `🔧 *${tool_name}*: \`${desc}\``
+      : `🔧 *${tool_name}*`;
+
+    sendIpcMessage(chatJid, groupFolder, text);
+    return {};
+  };
+}
+
+/**
+ * Create PostToolUse hook — fires after each tool call completes.
+ * Sends ✅ toolname: Xs to the Telegram chat.
+ */
+function createPostToolUseHook(
+  chatJid: string,
+  groupFolder: string,
+): HookCallback {
+  return async (input, toolUseId, _context) => {
+    const hookInput = input as PostToolUseHookInput;
+    const { tool_name, tool_use_id } = hookInput;
+
+    if (SKIP_TOOLS.has(tool_name)) return {};
+
+    const id = toolUseId || tool_use_id;
+    const startTime = id ? toolStartTimes[id] : undefined;
+    if (id) delete toolStartTimes[id];
+
+    const durationStr = startTime
+      ? `${((Date.now() - startTime) / 1000).toFixed(1)}s`
+      : '';
+
+    const text = durationStr
+      ? `✅ *${tool_name}*: ${durationStr}`
+      : `✅ *${tool_name}*`;
+
+    sendIpcMessage(chatJid, groupFolder, text);
     return {};
   };
 }
@@ -488,6 +646,12 @@ async function runQuery(
       hooks: {
         PreCompact: [
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
+        ],
+        PreToolUse: [
+          { hooks: [createPreToolUseHook(containerInput.chatJid, containerInput.groupFolder)] },
+        ],
+        PostToolUse: [
+          { hooks: [createPostToolUseHook(containerInput.chatJid, containerInput.groupFolder)] },
         ],
       },
     },
