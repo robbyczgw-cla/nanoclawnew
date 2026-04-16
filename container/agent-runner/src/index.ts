@@ -219,7 +219,7 @@ const SKIP_TOOLS = new Set([
 ]);
 
 // Max length for inline input descriptions
-const MAX_INPUT_PREVIEW = 60;
+const MAX_INPUT_PREVIEW = 120;
 
 // Hermi-style icons and short labels per tool
 const TOOL_EMOJI: Record<string, string> = {
@@ -267,6 +267,16 @@ function summarizeBash(raw: string): string {
   const words = stripped.split(' ');
   const bin = path.basename(words[0] ?? '');
   const sub = words[1] ?? '';
+  // Special case: ssh <host> "<remote-cmd>" — show the remote command too
+  if (bin === 'ssh' && words.length >= 3) {
+    const host = words[1];
+    const afterHost = stripped.slice(stripped.indexOf(host) + host.length).trim();
+    const remoteCmd = afterHost.replace(/^["']|["']$/g, '').trim();
+    const preview = `ssh ${host}: ${remoteCmd}`;
+    return preview.length > MAX_INPUT_PREVIEW
+      ? preview.slice(0, MAX_INPUT_PREVIEW) + '…'
+      : preview;
+  }
   if (BASH_WITH_SUBCOMMAND.has(bin) && sub && !sub.startsWith('-')) {
     const preview = `${bin} ${sub}`;
     return preview.length > MAX_INPUT_PREVIEW ? preview.slice(0, MAX_INPUT_PREVIEW) + '…' : preview;
