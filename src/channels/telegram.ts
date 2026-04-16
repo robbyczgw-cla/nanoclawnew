@@ -31,7 +31,10 @@ function markdownToHtml(text: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
-  out = out.replace(/```\w*\n?([\s\S]*?)```/g, (_m, c) => `<pre>${c.trimEnd()}</pre>`);
+  out = out.replace(
+    /```\w*\n?([\s\S]*?)```/g,
+    (_m, c) => `<pre>${c.trimEnd()}</pre>`,
+  );
   out = out.replace(/`([^`\n]+)`/g, (_m, c) => `<code>${c}</code>`);
   out = out.replace(/\*\*([^*\n]+)\*\*/g, (_m, i) => `<b>${i}</b>`);
   out = out.replace(/\*([^*\n]+)\*/g, (_m, i) => `<b>${i}</b>`);
@@ -105,7 +108,10 @@ export class TelegramChannel implements Channel {
       const fileUrl = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
       const resp = await fetch(fileUrl);
       if (!resp.ok) {
-        logger.warn({ fileId, status: resp.status }, 'Telegram file download failed');
+        logger.warn(
+          { fileId, status: resp.status },
+          'Telegram file download failed',
+        );
         return null;
       }
 

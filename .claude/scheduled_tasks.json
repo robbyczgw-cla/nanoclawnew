@@ -1,0 +1,8 @@
+[
+  {
+    "id": "79069ba2",
+    "cron": "35 23 * * *",
+    "recurring": true,
+    "prompt": "Update the Andy block in the shared agent memory file on Clawdnew.\n\n1. ssh -o StrictHostKeyChecking=no -i /workspace/group/.ssh/id_ed25519 root@100.87.165.6 \"cat /root/clawd/shared.md\"\n2. Update ONLY the ## Andy block with current status (4-6 bullets max)\n3. Write back with python3 sed via SSH"
+  }
+]

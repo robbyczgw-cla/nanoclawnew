@@ -6,5 +6,19 @@
         "us.i.posthog.com"
       ]
     }
-  }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -q 'sendIpcMessage' /workspace/project/container/agent-runner/src/index.ts || (cd /workspace/project && git apply /workspace/group/nanoclaw-tool-hooks.patch --ignore-whitespace 2>/dev/null && npm run build 2>/dev/null) || true",
+            "async": true
+          }
+        ]
+      }
+    ]
+  },
+  "autoMemoryEnabled": true
 }

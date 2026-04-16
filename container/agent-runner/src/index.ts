@@ -214,10 +214,104 @@ const IPC_MESSAGES_DIR = '/workspace/ipc/messages';
 // Tools that are too spammy or noisy to report in chat
 const SKIP_TOOLS = new Set([
   'WebSearch',  // often called in rapid sequence
+  'Glob',       // low-signal filesystem scans
+  'Grep',       // low-signal search ops
 ]);
 
 // Max length for inline input descriptions
-const MAX_INPUT_PREVIEW = 80;
+const MAX_INPUT_PREVIEW = 60;
+
+// Hermi-style icons and short labels per tool
+const TOOL_EMOJI: Record<string, string> = {
+  Bash: '🖥️',
+  Read: '📖',
+  Write: '✏️',
+  Edit: '✏️',
+  WebFetch: '🌐',
+  WebSearch: '🌐',
+  Agent: '🤖',
+  Task: '🤖',
+  TodoWrite: '📝',
+};
+const TOOL_LABEL: Record<string, string> = {
+  Bash: 'bash',
+  Read: 'read',
+  Write: 'write',
+  Edit: 'edit',
+  WebFetch: 'fetch',
+  WebSearch: 'search',
+  Agent: 'agent',
+  Task: 'task',
+  TodoWrite: 'todo',
+};
+
+// Tools to batch (rapid consecutive calls → "📖 read ×5: lastfile")
+const BATCH_TOOLS = new Set(['Read', 'Write', 'Edit', 'WebFetch']);
+
+// Show duration in PostToolUse only for Bash calls longer than this
+const LONG_CALL_THRESHOLD_MS = 3000;
+
+// Bins where we show "git commit", "npm run" etc. (first 2 words)
+const BASH_WITH_SUBCOMMAND = new Set([
+  'git', 'npm', 'apt', 'apt-get', 'pip', 'pip3',
+  'systemctl', 'docker', 'yarn', 'uv', 'gh', 'hermes', 'ssh',
+]);
+
+/** Extract the meaningful part of a bash command. */
+function summarizeBash(raw: string): string {
+  const cmd = raw.replace(/\s+/g, ' ').trim();
+  // Take only first statement (before && || ; |)
+  const first = cmd.split(/\s*(?:&&|\|\||;|\|)\s*/)[0].trim();
+  // Strip leading sudo
+  const stripped = first.replace(/^sudo\s+/, '');
+  const words = stripped.split(' ');
+  const bin = path.basename(words[0] ?? '');
+  const sub = words[1] ?? '';
+  if (BASH_WITH_SUBCOMMAND.has(bin) && sub && !sub.startsWith('-')) {
+    const preview = `${bin} ${sub}`;
+    return preview.length > MAX_INPUT_PREVIEW ? preview.slice(0, MAX_INPUT_PREVIEW) + '…' : preview;
+  }
+  return first.length > MAX_INPUT_PREVIEW ? first.slice(0, MAX_INPUT_PREVIEW) + '…' : first;
+}
+
+// Batch state for grouping rapid same-tool calls
+interface BatchEntry {
+  emoji: string;
+  label: string;
+  lastDesc: string;
+  count: number;
+  timer: ReturnType<typeof setTimeout>;
+}
+const toolBatch = new Map<string, BatchEntry>();
+
+function flushBatch(chatJid: string, groupFolder: string, toolName: string): void {
+  const entry = toolBatch.get(toolName);
+  if (!entry) return;
+  toolBatch.delete(toolName);
+  const suffix = entry.lastDesc ? `: ${entry.lastDesc}` : '';
+  const countStr = entry.count > 1 ? ` ×${entry.count}` : '';
+  sendIpcMessage(chatJid, groupFolder, `${entry.emoji} ${entry.label}${countStr}${suffix}`);
+}
+
+function sendBatched(
+  chatJid: string,
+  groupFolder: string,
+  toolName: string,
+  emoji: string,
+  label: string,
+  desc: string,
+): void {
+  const existing = toolBatch.get(toolName);
+  if (existing) {
+    clearTimeout(existing.timer);
+    existing.count++;
+    existing.lastDesc = desc;
+    existing.timer = setTimeout(() => flushBatch(chatJid, groupFolder, toolName), 300);
+  } else {
+    const timer = setTimeout(() => flushBatch(chatJid, groupFolder, toolName), 300);
+    toolBatch.set(toolName, { emoji, label, lastDesc: desc, count: 1, timer });
+  }
+}
 
 /**
  * Write a message IPC file so the host delivers it to the Telegram chat.
@@ -257,10 +351,7 @@ function describeToolInput(toolName: string, toolInput: unknown): string {
 
   // Tool-specific formatting
   if (toolName === 'Bash' && typeof input.command === 'string') {
-    const cmd = input.command.replace(/\s+/g, ' ').trim();
-    return cmd.length > MAX_INPUT_PREVIEW
-      ? cmd.slice(0, MAX_INPUT_PREVIEW) + '…'
-      : cmd;
+    return summarizeBash(input.command);
   }
   if ((toolName === 'Read' || toolName === 'Write' || toolName === 'Edit') && typeof input.file_path === 'string') {
     return input.file_path;
@@ -325,11 +416,15 @@ function createPreToolUseHook(
     if (id) toolStartTimes[id] = Date.now();
 
     const desc = describeToolInput(tool_name, tool_input);
-    const text = desc
-      ? `🔧 *${tool_name}*: \`${desc}\``
-      : `🔧 *${tool_name}*`;
+    const emoji = TOOL_EMOJI[tool_name] ?? '🔧';
+    const label = TOOL_LABEL[tool_name] ?? tool_name.toLowerCase();
 
-    sendIpcMessage(chatJid, groupFolder, text);
+    if (BATCH_TOOLS.has(tool_name)) {
+      sendBatched(chatJid, groupFolder, tool_name, emoji, label, desc);
+    } else {
+      const text = desc ? `${emoji} ${label}: ${desc}` : `${emoji} ${label}`;
+      sendIpcMessage(chatJid, groupFolder, text);
+    }
     return {};
   };
 }
@@ -352,15 +447,13 @@ function createPostToolUseHook(
     const startTime = id ? toolStartTimes[id] : undefined;
     if (id) delete toolStartTimes[id];
 
-    const durationStr = startTime
-      ? `${((Date.now() - startTime) / 1000).toFixed(1)}s`
-      : '';
-
-    const text = durationStr
-      ? `✅ *${tool_name}*: ${durationStr}`
-      : `✅ *${tool_name}*`;
-
-    sendIpcMessage(chatJid, groupFolder, text);
+    // Only report duration for slow Bash calls (signal worth sending)
+    if (tool_name === 'Bash' && startTime) {
+      const elapsed = Date.now() - startTime;
+      if (elapsed > LONG_CALL_THRESHOLD_MS) {
+        sendIpcMessage(chatJid, groupFolder, `🖥️ bash: done in ${(elapsed / 1000).toFixed(1)}s`);
+      }
+    }
     return {};
   };
 }
@@ -597,6 +690,7 @@ async function runQuery(
     prompt: stream,
     options: {
       cwd: '/workspace/group',
+      model: 'claude-opus-4-6',
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
@@ -997,4 +1091,9 @@ async function main(): Promise<void> {
   }
 }
 
-main();
+main().then(() => {
+  // Force exit: the SDK or MCP server subprocess may hold open handles
+  // that prevent natural process termination, causing the Docker container
+  // to hang indefinitely after the agent-runner finishes its work.
+  process.exit(0);
+});
