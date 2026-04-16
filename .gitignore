@@ -25,6 +25,9 @@ groups/global/*
 # Temp files
 .tmp-*
 
+# Runtime logs (not in logs/)
+nanoclaw.log
+
 # OS
 .DS_Store
 
