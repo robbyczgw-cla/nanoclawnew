@@ -13,7 +13,12 @@
  */
 import fs from 'fs';
 import path from 'path';
-import pino from 'pino';
+// Named import (not default) — pino's .d.ts under NodeNext resolution
+// exports `{ pino as default, pino }`, but the namespace/function merge at
+// `declare namespace pino` + `declare function pino` makes the default
+// resolve to `typeof pino` (the namespace type), which isn't callable.
+// The named export resolves to the callable function.
+import { pino } from 'pino';
 
 import {
   makeWASocket,

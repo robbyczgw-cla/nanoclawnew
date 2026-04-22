@@ -12,7 +12,8 @@ import fs from 'fs';
 import path from 'path';
 import http from 'http';
 import { createRequire } from 'module';
-import pino from 'pino';
+// Named import (not default) — see src/channels/whatsapp.ts for the why.
+import { pino } from 'pino';
 
 import {
   makeWASocket,
