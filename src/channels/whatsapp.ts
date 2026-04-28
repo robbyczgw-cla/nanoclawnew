@@ -32,6 +32,7 @@ import {
 } from '@whiskeysockets/baileys';
 import type { GroupMetadata, WAMessageKey, WAMessage, WASocket } from '@whiskeysockets/baileys';
 
+import { isSafeAttachmentName } from '../attachment-safety.js';
 import { ASSISTANT_HAS_OWN_NUMBER, ASSISTANT_NAME, DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -306,8 +307,18 @@ registerChannelAdapter('whatsapp', {
         if (!normalized[key]) continue;
         try {
           const buffer = await downloadMediaMessage(msg, 'buffer', {});
-          const docFilename = normalized[key].fileName;
-          const filename = docFilename || `${type}-${Date.now()}${ext}`;
+          // documentMessage.fileName is attacker-controlled and rides through
+          // WhatsApp's E2E channel — Meta can't sanitize it server-side. Without
+          // this guard, a `..`-laden fileName escapes attachDir on path.join.
+          const rawFilename = normalized[key].fileName;
+          const fallback = `${type}-${Date.now()}${ext}`;
+          const filename = isSafeAttachmentName(rawFilename) ? rawFilename : fallback;
+          if (rawFilename && filename !== rawFilename) {
+            log.warn('Refused unsafe attachment filename — would escape attachments dir', {
+              rawFilename,
+              replacement: filename,
+            });
+          }
           const attachDir = path.join(DATA_DIR, 'attachments');
           fs.mkdirSync(attachDir, { recursive: true });
           const filePath = path.join(attachDir, filename);
