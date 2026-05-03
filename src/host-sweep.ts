@@ -256,7 +256,13 @@ export function _resetStuckProcessingRowsForTesting(
   session: Session,
   reason: string,
 ): void {
-  resetStuckProcessingRows(inDb, outDb, session, reason);
+  // In tests, outDb is an in-memory database with no filesystem path, so the
+  // production-path call to openOutboundDbRw(agent_group_id, session_id) would
+  // fail (the path doesn't exist) and silently swallow the error in the catch
+  // block, leaving the orphan claim in place — which is exactly the behaviour
+  // the regression tests are written to detect. Inject an opener that returns
+  // the same outDb so the delete runs on the caller's handle.
+  resetStuckProcessingRows(inDb, outDb, session, reason, () => outDb);
 }
 
 function resetStuckProcessingRows(
@@ -264,6 +270,7 @@ function resetStuckProcessingRows(
   outDb: Database.Database,
   session: Session,
   reason: string,
+  openRw: (agentGroupId: string, sessionId: string) => Database.Database = openOutboundDbRw,
 ): void {
   const claims = getProcessingClaims(outDb);
   const now = Date.now();
@@ -305,7 +312,7 @@ function resetStuckProcessingRows(
   // outDb was opened readonly for reads above; reopen with write access for this delete.
   let outDbRw: Database.Database | null = null;
   try {
-    outDbRw = openOutboundDbRw(session.agent_group_id, session.id);
+    outDbRw = openRw(session.agent_group_id, session.id);
     const cleared = deleteOrphanProcessingClaims(outDbRw);
     if (cleared > 0) {
       log.info('Cleared orphan processing claims', { sessionId: session.id, cleared, reason });
@@ -313,6 +320,8 @@ function resetStuckProcessingRows(
   } catch (err) {
     log.warn('Failed to clear orphan processing claims', { sessionId: session.id, err });
   } finally {
-    outDbRw?.close();
+    // Don't close the caller-supplied outDb (test path injects it as the rw
+    // handle). Production opens a fresh connection here, which we own + close.
+    if (outDbRw && outDbRw !== outDb) outDbRw.close();
   }
 }
