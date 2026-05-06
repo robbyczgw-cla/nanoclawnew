@@ -22,6 +22,23 @@ import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
+import { getInboundDb } from '../db/connection.js';
+
+// Detect whether this agent turn was triggered by a scheduled-task wake-up
+// (vs. an interactive chat message). Scheduled tasks often run with explicit
+// silent-on-OK behavior — leaking tool-call previews to chat creates orphan-
+// notification noise without context. We cache per-process so the first turn
+// after spawn determines the policy.
+let _isTaskSession: boolean | null = null;
+function isTaskSession(): boolean {
+  if (_isTaskSession !== null) return _isTaskSession;
+  try {
+    const db = getInboundDb();
+    const row = db.prepare("SELECT kind FROM messages_in ORDER BY seq DESC LIMIT 1").get() as { kind?: string } | undefined;
+    _isTaskSession = row?.kind === 'task';
+  } catch { _isTaskSession = false; }
+  return _isTaskSession;
+}
 
 const SKIP_TOOLS = new Set(['WebSearch', 'Glob', 'Grep']);
 
@@ -278,6 +295,10 @@ function describeToolInput(toolName: string, toolInput: unknown): string {
  * is swallowed so a broken hook can never kill the agent turn.
  */
 function emit(text: string): void {
+  // Scheduled-task sessions: suppress tool-vis entirely. Orphan tool-call
+  // previews leak into chat without context when the agent stays silent
+  // on a successful "all OK" check — pure noise to the user.
+  if (isTaskSession()) return;
   try {
     const routing = getSessionRouting();
     if (!routing.channel_type || !routing.platform_id) {
@@ -290,7 +311,10 @@ function emit(text: string): void {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: text,
+      // Mark as tool-visibility so the chat-sdk-bridge accumulates these
+      // into a single edited message-bubble per thread (Telegram-style),
+      // rather than sending a new notification per tool call.
+      content: JSON.stringify({ text, _toolVis: true }),
     });
   } catch (err) {
     log(`emit failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -341,6 +365,7 @@ const progressTimers: Record<string, ReturnType<typeof setInterval>> = {};
  * still gets recorded even if visibility errors).
  */
 export const preToolUseVisibility: HookCallback = async (input, toolUseId) => {
+  if (skipVisibility()) return { continue: true };
   const i = input as { tool_name?: string; tool_input?: unknown; tool_use_id?: string; transcript_path?: string };
   // Skip subagent (Task/Agent) tool calls — user wants only the top-level
   // agent's activity in chat. Subagent transcripts live under `/subagents/`.
@@ -390,6 +415,7 @@ export const preToolUseVisibility: HookCallback = async (input, toolUseId) => {
  * out — the pre-hook message is enough signal.
  */
 export const postToolUseVisibility: HookCallback = async (input, toolUseId) => {
+  if (skipVisibility()) return { continue: true };
   const i = input as {
     hook_event_name?: string;
     tool_name?: string;
